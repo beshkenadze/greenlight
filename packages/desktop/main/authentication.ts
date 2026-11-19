@@ -3,6 +3,7 @@ import { createWindow } from './helpers'
 import Application from './application'
 import { Msal } from 'xal-node'
 import AuthTokenStore from './helpers/tokenstore'
+import type { DeviceLogin } from '../device-login'
 import i18n from 'i18next';
 
 
@@ -19,6 +20,8 @@ export default class Authentication {
     _isAuthenticated:boolean = false
     _appLevel:number = 0
 
+    deviceLogin:DeviceLogin | null = null
+    private deviceLoginInProgress = false
     private t = i18n.t.bind(i18n);
 
     constructor(application:Application){
@@ -90,6 +93,7 @@ export default class Authentication {
                 this._application.authenticationCompleted(streamingTokens, webToken)
 
             }).catch((error) => {
+                this._isAuthenticating = false
                 this._application.log('authenticationV2', __filename+'[getTokens()] Failed to retrieve web tokens:', error)
                 dialog.showMessageBox({
                     message: this.t('errors.failedToRetrieveWebTokens') + ' ' + JSON.stringify(error),
@@ -108,7 +112,13 @@ export default class Authentication {
         })
     }
 
-    startAuthflow(){
+    async startAuthflow(){
+        if(this.deviceLoginInProgress){
+            return
+        }
+
+        this.deviceLoginInProgress = true
+        this._isAuthenticating = true
         this._application.log('authenticationV2', '[startAuthflow()] Starting authentication flow')
 
         const forceRegionIp = this._application._store.get('force_region_ip', '')
@@ -119,32 +129,25 @@ export default class Authentication {
             this._msal.setDefaultHeaders({})
         }
 
-        this._msal.doDeviceCodeAuth().then((data) => {
-            this._application.log('authenticationV2', '[startAuthflow()] Starting devicecode auth:', data)
+        try {
+            const data = await this._msal.doDeviceCodeAuth()
+            const verificationUri = new URL(data.verification_uri)
+            if(verificationUri.protocol !== 'https:' || !data.user_code){
+                throw new Error('Invalid device sign-in response')
+            }
+            this.deviceLogin = { verificationUri: verificationUri.href, userCode: data.user_code }
 
-            dialog.showMessageBox({
-                message: data.message+' Click OK to continue after entering code.',
-                type: 'info',
-            })
-
-            this._isAuthenticating = true
-
-            this._msal.doPollForDeviceCodeAuth(data.device_code).then((token) => {
-                this._application.log('authenticationV2', '[startAuthflow()] Devicecode authentication successful:', token)
-
-                this.getTokens()
-
-            }).catch((error) => {
-                this._application.log('authenticationV2', '[startAuthflow()] Error during devicecode polling auth:', error)
-                dialog.showErrorBox('Error', 'Failed to perform MSAL authentixation: ' + JSON.stringify(error))
-
-                this._isAuthenticating = false
-            })
-
-        }).catch((error) => {
-            this._application.log('authenticationV2', '[startAuthflow()] Error during devicecode auth:', error)
-            dialog.showErrorBox('Error', this.t('errors.errorAuthentificationUser') + ' ' + JSON.stringify(error))
-        })
+            await this._msal.doPollForDeviceCodeAuth(data.device_code, data.expires_in * 1000)
+            this._application.log('authenticationV2', '[startAuthflow()] Device code authentication completed')
+            this.getTokens()
+        } catch (error) {
+            this._isAuthenticating = false
+            this._application.log('authenticationV2', '[startAuthflow()] Device code authentication failed:', error)
+            dialog.showErrorBox('Error', this.t('errors.errorAuthentificationUser'))
+        } finally {
+            this.deviceLogin = null
+            this.deviceLoginInProgress = false
+        }
     }
 
     openAuthWindow(url){
