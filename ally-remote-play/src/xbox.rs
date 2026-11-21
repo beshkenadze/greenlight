@@ -1,3 +1,4 @@
+use crate::journal;
 use reqwest::{Method, Url, blocking::{Client, RequestBuilder, Response}, redirect::Policy};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -93,7 +94,11 @@ pub fn client() -> Result<Client> {
 }
 
 pub fn read(response: Response, stage: &str) -> Result<Value> {
-    if !response.status().is_success() { return Err(format!("{stage}: HTTP {}", response.status().as_u16())); }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        journal::record("http_error", json!({"stage": stage, "status": status}));
+        return Err(format!("{stage}: HTTP {status}"));
+    }
     if response.status().as_u16() == 204 || response.content_length() == Some(0) { return Ok(Value::Null); }
     let bytes = response.bytes().map_err(|_| format!("{stage}: incomplete response"))?;
     if bytes.is_empty() { return Ok(Value::Null); }
@@ -101,7 +106,11 @@ pub fn read(response: Response, stage: &str) -> Result<Value> {
 }
 
 fn send(request: RequestBuilder, stage: &str) -> Result<Response> {
-    request.send().map_err(|error| if error.is_timeout() { format!("{stage}: timed out") } else { format!("{stage}: network request failed") })
+    request.send().map_err(|error| {
+        let reason = if error.is_timeout() { "timed out" } else { "network request failed" };
+        journal::record("network_error", json!({"stage": stage, "reason": reason}));
+        format!("{stage}: {reason}")
+    })
 }
 
 fn field(value: &Value, key: &str, stage: &str) -> Result<String> {
@@ -156,13 +165,19 @@ pub fn finish_sign_in(client: Client, client_id: String, device: DeviceCode, can
         ]), stage)?;
         let status = raw.status();
         let response = raw.json::<OAuthToken>().map_err(|_| format!("{stage}: HTTP {}", status.as_u16()))?;
-        if status.is_success() { break response; }
+        if status.is_success() {
+            journal::record("microsoft_confirmation_completed", json!({}));
+            break response;
+        }
         match response.error.as_deref() {
             Some("authorization_pending") => {},
             Some("slow_down") => interval += 5,
             Some("authorization_declined" | "access_denied") => return Err("Microsoft sign-in was declined".into()),
             Some("expired_token") => return Err("Microsoft code expired".into()),
-            _ => return Err(format!("{stage}: HTTP {}", status.as_u16())),
+            _ => {
+                journal::record("http_error", json!({"stage": stage, "status": status.as_u16()}));
+                return Err(format!("{stage}: HTTP {}", status.as_u16()));
+            }
         }
     };
     let access = response.access_token.ok_or("Microsoft returned no access token")?;

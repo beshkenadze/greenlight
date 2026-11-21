@@ -1,3 +1,4 @@
+use crate::journal;
 use crate::xbox::{Console, Result, Xbox};
 use serde_json::{Value, json};
 use std::{
@@ -70,9 +71,11 @@ fn command(player: &mut Player, message: Value) -> Result<()> {
 pub fn play(xbox: Arc<Xbox>, console: Console, window: Option<VideoWindow>,
             cancel: Arc<AtomicBool>, status: impl Fn(String)) -> Result<()> {
     status("Preparing Xbox session…".into());
+    journal::record("stream_requested", json!({"bitrate_limit_kbps": 20480}));
     let path = xbox.reserve(&console)?;
     let result = (|| {
         xbox.provision(&path, &cancel)?;
+        journal::record("stream_provisioned", json!({}));
         let mut player = launch(window)?;
         let output = player.0.stdout.take().ok_or("Missing GStreamer output pipe")?;
         let (tx, rx) = mpsc::channel();
@@ -93,6 +96,7 @@ pub fn play(xbox: Arc<Xbox>, console: Console, window: Option<VideoWindow>,
         let mut connected = false;
         while !cancel.load(Ordering::Relaxed) {
             if !connected && start.elapsed() > Duration::from_secs(35) {
+                journal::record("first_video_timeout", json!({}));
                 return Err("GStreamer did not receive video before the timeout".into());
             }
             if keepalive.elapsed() >= Duration::from_secs(30) {
@@ -115,10 +119,18 @@ pub fn play(xbox: Arc<Xbox>, console: Console, window: Option<VideoWindow>,
                         let width = event.get("width").and_then(Value::as_u64).unwrap_or_default();
                         let height = event.get("height").and_then(Value::as_u64).unwrap_or_default();
                         let decoder = event.get("decoder").and_then(Value::as_str).unwrap_or("GStreamer");
+                        let decoder = match decoder {
+                            "vah264dec" | "avdec_h264" | "vtdec" | "vtdec_hw" | "d3d11h264dec" | "d3d12h264dec" => decoder,
+                            _ => "unknown",
+                        };
+                        journal::record("video_active", json!({"width": width, "height": height, "decoder": decoder}));
                         status(format!("{width}×{height} · {decoder}"));
                     }
-                    Some("error") => return Err(event.get("message").and_then(Value::as_str)
-                        .unwrap_or("GStreamer playback failed").to_owned()),
+                    Some("error") => {
+                        journal::record("gstreamer_error", json!({}));
+                        return Err(event.get("message").and_then(Value::as_str)
+                            .unwrap_or("GStreamer playback failed").to_owned());
+                    }
                     _ => {}
                 },
                 Err(mpsc::RecvTimeoutError::Timeout) => {},

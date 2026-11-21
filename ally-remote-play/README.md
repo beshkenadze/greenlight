@@ -54,6 +54,14 @@ appropriately registered app. The default is the public Xbox client ID used
 by the interoperable device flow. The app does not bundle a client secret,
 copy any other application's credentials, or persist the current sign-in.
 
+## Diagnostics
+
+The app writes one JSON event per line to standard error. To save a local
+journal, run the binary with `2>>ally-remote-play.log`, then follow it with
+`tail -f ally-remote-play.log`. The journal contains sign-in and stream stages,
+HTTP failure statuses, console counts, and negotiated video dimensions and
+decoder. It omits codes, tokens, console IDs, and SDP/ICE payloads.
+
 The GStreamer worker is based on the MIT-licensed experimental media path
 previously developed alongside Greenlight. See LICENSE for the original
 Greenlight attribution. This standalone app does not link or invoke Greenlight.

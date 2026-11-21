@@ -1,4 +1,5 @@
 mod input;
+mod journal;
 mod media;
 mod xbox;
 
@@ -6,6 +7,7 @@ use gpui_kit::component::{button::{Button, ButtonVariants}, label::Label};
 use gpui_kit::*;
 use qrcode::{Color, QrCode};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use serde_json::json;
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc}, thread, time::Duration};
 
 enum Event {
@@ -75,6 +77,7 @@ impl RemotePlay {
         self.sign_in = Some(cancel.clone());
         self.device = None;
         self.status = "Requesting Microsoft sign-in…".into();
+        journal::record("sign_in_started", json!({}));
         let tx = self.tx.clone();
         thread::spawn(move || {
             let result = (|| {
@@ -82,6 +85,7 @@ impl RemotePlay {
                 let client_id = xbox::public_client_id();
                 let device = xbox::begin_sign_in(&client, &client_id)?;
                 let (url, prefilled) = device.verification_link();
+                journal::record("sign_in_waiting_for_confirmation", json!({"prefilled": prefilled}));
                 let _ = tx.send(Event::Device(DevicePrompt {
                     qr: QrCode::new(url.as_str()).ok().map(Arc::new),
                     url: url.to_string(),
@@ -117,11 +121,13 @@ impl RemotePlay {
                 self.device = Some(prompt);
             }
             Event::Account { xbox, consoles } => {
+                journal::record("xbox_discovery_completed", json!({"console_count": consoles.len()}));
                 self.status = if consoles.is_empty() { "No Xbox available for Remote Play".into() } else { "Choose an Xbox".into() };
                 self.account = Some(xbox);
                 self.consoles = consoles;
             }
             Event::SignInEnded(result) => {
+                journal::record("sign_in_ended", json!({"success": result.is_ok()}));
                 self.sign_in = None;
                 self.device = None;
                 if let Err(error) = result { self.status = error; }
@@ -130,6 +136,7 @@ impl RemotePlay {
                 self.status = status;
             }
             Event::StreamEnded(result) => {
+                journal::record("stream_ended", json!({"success": result.is_ok()}));
                 self.stream = None;
                 self.status = result.err().unwrap_or_else(|| "Stream stopped".into());
             }
@@ -183,6 +190,7 @@ impl Render for RemotePlay {
 }
 
 fn main() {
+    journal::record("app_started", json!({"version": env!("CARGO_PKG_VERSION")}));
     let (tx, rx) = mpsc::channel();
     application().with_assets(assets::Assets).run(|cx| {
         init(cx);
