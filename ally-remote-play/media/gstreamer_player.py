@@ -220,7 +220,7 @@ class Player:
         try:
             match command['action']:
                 case 'start':
-                    self.start(command['bitrate'])
+                    self.start(command['bitrate'], command.get('width', 1920), command.get('height', 1080))
                 case 'answer':
                     _, sdp = GstSdp.SDPMessage.new_from_text(command['sdp'])
                     answer = GstWebRTC.WebRTCSessionDescription.new(GstWebRTC.WebRTCSDPType.ANSWER, sdp)
@@ -257,7 +257,8 @@ class Player:
             self.loop.quit()
         return GLib.SOURCE_REMOVE
 
-    def start(self, bitrate):
+    def start(self, bitrate, width, height):
+        self.target_width, self.target_height = int(width), int(height)
         self.connect_gamepad()
         if not self.window_id and sys.platform.startswith('linux') and os.getenv('DISPLAY'):
             parent = int(os.getenv('GREENLIGHT_VIDEO_PARENT_XID', '0'), 0)
@@ -322,21 +323,23 @@ class Player:
             GLib.idle_add(self.handshake_ack)
 
     def handshake_ack(self):
+        width, height = self.target_width, self.target_height
+        dimensions = {'width': width, 'height': height}
         self.send_json('control', {'message': 'authorizationRequest',
             'accessKey': '4BDB3609-C1F1-4195-9B37-FEFF45DA8B8E'})
         self.send_json('control', {'message': 'gamepadChanged', 'gamepadIndex': 0, 'wasAdded': True})
         self.send_json('control', {'message': 'VideoPreference', 'type': 'VideoPreference',
-            'resolution': {'width': 1920, 'height': 1080}, 'dimensions': {'width': 1920, 'height': 1080}, 'maxFPS': 60})
-        self.send_json('control', {'message': 'userRequestedResolutionUpdate', 'resolutionAlias': '1080'})
+            'resolution': dimensions, 'dimensions': dimensions, 'maxFPS': 60})
+        self.send_json('control', {'message': 'userRequestedResolutionUpdate', 'resolutionAlias': str(height)})
         for target, content in (
             ('systemUi/configuration', {'version': [0, 1, 0], 'systemUis': []}),
             ('properties/clientappinstallidchanged', {'clientAppInstallId': str(uuid.uuid4())}),
             ('characteristics/orientationchanged', {'orientation': 0}),
             ('characteristics/touchinputenabledchanged', {'touchInputEnabled': False}),
             ('characteristics/clientdevicecapabilities', {}),
-            ('characteristics/dimensionschanged', {'horizontal': 1920, 'vertical': 1080,
-                'preferredWidth': 1920, 'preferredHeight': 1080, 'safeAreaLeft': 0, 'safeAreaTop': 0,
-                'safeAreaRight': 1920, 'safeAreaBottom': 1080, 'supportsCustomResolution': True}),
+            ('characteristics/dimensionschanged', {'horizontal': width, 'vertical': height,
+                'preferredWidth': width, 'preferredHeight': height, 'safeAreaLeft': 0, 'safeAreaTop': 0,
+                'safeAreaRight': width, 'safeAreaBottom': height, 'supportsCustomResolution': True}),
         ):
             self.send_json('message', {'type': 'Message', 'target': '/streaming/' + target,
                 'content': json.dumps(content), 'id': str(uuid.uuid4()), 'cv': ''})

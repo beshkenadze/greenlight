@@ -1,5 +1,5 @@
 use crate::journal;
-use crate::xbox::{Console, Result, Xbox};
+use crate::xbox::{Console, Resolution, Result, Xbox};
 use serde_json::{Value, json};
 use std::{
     env, fs, io::{BufRead, BufReader, Write},
@@ -68,11 +68,12 @@ fn command(player: &mut Player, message: Value) -> Result<()> {
         .map_err(|_| "GStreamer worker stopped".to_string())
 }
 
-pub fn play(xbox: Arc<Xbox>, console: Console, window: Option<VideoWindow>,
+pub fn play(xbox: Arc<Xbox>, console: Console, resolution: Resolution, window: Option<VideoWindow>,
             cancel: Arc<AtomicBool>, status: impl Fn(String)) -> Result<()> {
     status("Preparing Xbox session…".into());
-    journal::record("stream_requested", json!({"bitrate_limit_kbps": 20480}));
-    let path = xbox.reserve(&console)?;
+    let (requested_width, requested_height) = resolution.dimensions();
+    journal::record("stream_requested", json!({"bitrate_limit_kbps": 20480, "width": requested_width, "height": requested_height}));
+    let path = xbox.reserve(&console, resolution)?;
     let result = (|| {
         xbox.provision(&path, &cancel)?;
         journal::record("stream_provisioned", json!({}));
@@ -86,10 +87,11 @@ pub fn play(xbox: Arc<Xbox>, console: Console, window: Option<VideoWindow>,
                 }
             }
         });
-        command(&mut player, json!({"action":"start","bitrate":20480}))?;
+        command(&mut player, json!({"action":"start","bitrate":20480,"width":requested_width,"height":requested_height}))?;
         status("Negotiating the GStreamer connection…".into());
         let start = Instant::now();
         let mut keepalive = Instant::now();
+        let mut last_stats = Instant::now();
         let mut controller = crate::input::Controller::new();
         let mut answer_set = false;
         let mut candidates = None;
@@ -102,6 +104,10 @@ pub fn play(xbox: Arc<Xbox>, console: Console, window: Option<VideoWindow>,
             if keepalive.elapsed() >= Duration::from_secs(30) {
                 xbox.keepalive(&path)?;
                 keepalive = Instant::now();
+            }
+            if connected && last_stats.elapsed() >= Duration::from_secs(5) {
+                command(&mut player, json!({"action":"stats"}))?;
+                last_stats = Instant::now();
             }
             if let Some(state) = controller.poll() { command(&mut player, state)?; }
             let poll_ms = if cfg!(any(target_os = "windows", target_os = "macos")) { 8 } else { 150 };
@@ -123,8 +129,18 @@ pub fn play(xbox: Arc<Xbox>, console: Console, window: Option<VideoWindow>,
                             "vah264dec" | "avdec_h264" | "vtdec" | "vtdec_hw" | "d3d11h264dec" | "d3d12h264dec" => decoder,
                             _ => "unknown",
                         };
-                        journal::record("video_active", json!({"width": width, "height": height, "decoder": decoder}));
+                        journal::record("video_active", json!({"width": width, "height": height, "decoder": decoder,
+                            "requested_width": requested_width, "requested_height": requested_height}));
                         status(format!("{width}×{height} · {decoder}"));
+                    }
+                    Some("stats") => {
+                        let count = |key| event.get(key).and_then(Value::as_u64).unwrap_or_default();
+                        journal::record("video_stats", json!({
+                            "requested_height": requested_height, "width": count("width"), "height": count("height"),
+                            "worker_time_ms": event.get("time").and_then(Value::as_f64),
+                            "encoded_bytes": count("encodedBytes"), "decoded_frames": count("decodedFrames"),
+                            "rendered_frames": count("renderedFrames"), "sink_dropped": count("sinkDropped"),
+                        }));
                     }
                     Some("error") => {
                         journal::record("gstreamer_error", json!({}));

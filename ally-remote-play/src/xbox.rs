@@ -1,4 +1,4 @@
-use crate::journal;
+use crate::{journal, session_store};
 use reqwest::{Method, Url, blocking::{Client, RequestBuilder, Response}, redirect::Policy};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -10,6 +10,33 @@ const CLIENT_ID: &str = "1f907974-e22b-4810-a9de-d9647380c97e";
 const OAUTH: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
 const SCOPE: &str = "xboxlive.signin openid profile offline_access";
 const TRANSFER_SCOPE: &str = "service::http://Passport.NET/purpose::PURPOSE_XBOX_CLOUD_CONSOLE_TRANSFER_TOKEN";
+
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum Resolution {
+    P720,
+    P800,
+    P900,
+    #[default]
+    P1080,
+    P1440,
+}
+
+impl Resolution {
+    pub const CHOICES: [(Self, &'static str); 5] = [
+        (Self::P720, "720p"), (Self::P800, "800p (test)"), (Self::P900, "900p (test)"),
+        (Self::P1080, "1080p"), (Self::P1440, "1440p"),
+    ];
+
+    pub fn dimensions(self) -> (u32, u32) {
+        match self {
+            Self::P720 => (1280, 720),
+            Self::P800 => (1422, 800),
+            Self::P900 => (1600, 900),
+            Self::P1080 => (1920, 1080),
+            Self::P1440 => (2560, 1440),
+        }
+    }
+}
 
 #[derive(Clone, Deserialize)]
 pub struct Console {
@@ -182,6 +209,47 @@ pub fn finish_sign_in(client: Client, client_id: String, device: DeviceCode, can
     };
     let access = response.access_token.ok_or("Microsoft returned no access token")?;
     let refresh_token = response.refresh_token.ok_or("Microsoft returned no refresh token")?;
+    save_session(&client_id, &refresh_token);
+    xbox_login(client, client_id, access, refresh_token)
+}
+
+fn save_session(client_id: &str, refresh_token: &str) {
+    journal::record("session_saved", json!({"success": session_store::save(client_id, refresh_token).is_ok()}));
+}
+
+pub fn restore_sign_in() -> Result<Option<Xbox>> {
+    let client_id = public_client_id();
+    let Some(previous) = session_store::load(&client_id).map_err(|_| "Could not read saved Microsoft sign-in")? else {
+        return Ok(None);
+    };
+    journal::record("session_restore_started", json!({}));
+    let client = client()?;
+    let stage = "Microsoft refresh";
+    let raw = send(client.post(format!("{OAUTH}/token")).form(&[
+        ("grant_type", "refresh_token"), ("client_id", &client_id), ("refresh_token", &previous), ("scope", SCOPE),
+    ]), stage)?;
+    let status = raw.status();
+    let response = raw.json::<OAuthToken>().map_err(|_| format!("{stage}: invalid response"))?;
+    if !status.is_success() {
+        if matches!(response.error.as_deref(), Some("invalid_grant" | "interaction_required")) {
+            session_store::clear().map_err(|_| "Could not remove expired Microsoft sign-in")?;
+            journal::record("session_expired", json!({}));
+            return Ok(None);
+        }
+        journal::record("http_error", json!({"stage": stage, "status": status.as_u16()}));
+        return Err(format!("{stage}: HTTP {}", status.as_u16()));
+    }
+    let access = response.access_token.ok_or("Microsoft returned no access token")?;
+    let refresh_token = match response.refresh_token {
+        Some(token) => { save_session(&client_id, &token); token }
+        None => previous,
+    };
+    let xbox = xbox_login(client, client_id, access, refresh_token)?;
+    journal::record("session_restored", json!({}));
+    Ok(Some(xbox))
+}
+
+fn xbox_login(client: Client, client_id: String, access: String, refresh_token: String) -> Result<Xbox> {
     let stage = "Xbox user authentication";
     let user = read(send(client.post("https://user.auth.xboxlive.com/user/authenticate")
         .header("x-xbl-contract-version", "1").json(&json!({
@@ -222,13 +290,14 @@ impl Xbox {
             .map_err(|_| "xHome returned an invalid console list".to_string())
     }
 
-    pub fn reserve(&self, console: &Console) -> Result<String> {
+    pub fn reserve(&self, console: &Console, resolution: Resolution) -> Result<String> {
+        let (width, height) = resolution.dimensions();
         let device = json!({
           "appInfo":{"env":{"clientAppId":"Microsoft.GamingApp","clientAppType":"native",
              "clientAppVersion":"2203.1001.4.0","clientSdkVersion":"8.5.2","httpEnvironment":"prod","sdkInstallId":""}},
           "dev":{"hw":{"make":"Microsoft","model":"Surface Pro","sdktype":"native"},
              "os":{"name":"Windows 11","ver":"22631.2715","platform":"desktop"},
-             "displayInfo":{"dimensions":{"widthInPixels":1920,"heightInPixels":1080},"pixelDensity":{"dpiX":1,"dpiY":1}}}
+             "displayInfo":{"dimensions":{"widthInPixels":width,"heightInPixels":height},"pixelDensity":{"dpiX":1,"dpiY":1}}}
         });
         let stage = "Start Xbox Remote Play";
         let reply = read(send(self.request(Method::POST, "/v5/sessions/home/play")?

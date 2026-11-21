@@ -23,7 +23,10 @@ The media worker can be placed beside the executable or selected with
 `ALLY_GST_RUNTIME` for a private GStreamer library directory. On Gamescope,
 `ALLY_GAMESCOPE_FOCUS=1` brings the X11 app window to the front. No SteamOS
 system package changes are needed if these dependencies are installed in a
-private runtime. The prototype requests 1080p at a 20 Mbit/s limit.
+private runtime. The client defaults to a 1080p request at a 20 Mbit/s limit.
+The resolution picker also offers 720p, 1440p, and experimental 800p and
+900p requests. Xbox controls the transmitted size. The app and the journal
+report the actual decoder dimensions separately from the requested size.
 
 ## Platform ports
 
@@ -52,7 +55,13 @@ console ID does not register or link an Xbox to another account.
 `XBOX_CLIENT_ID` can override the public OAuth app ID when deploying an
 appropriately registered app. The default is the public Xbox client ID used
 by the interoperable device flow. The app does not bundle a client secret,
-copy any other application's credentials, or persist the current sign-in.
+copy any other application's credentials, or persist short-lived access
+tokens. It saves the Microsoft refresh token locally and rotates it when
+Microsoft returns a replacement. On Unix the session file is accessible only
+to the current user (mode 0600). The file is not encrypted at rest. The
+optional `ALLY_SESSION_FILE` environment variable overrides its location.
+**Sign out** removes the stored session from this device. When Microsoft
+expires or revokes the saved token, confirm sign-in again.
 
 ## Diagnostics
 
