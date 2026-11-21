@@ -114,7 +114,7 @@ impl RemotePlay {
         let tx = self.tx.clone();
         let resolution = self.resolution;
         thread::spawn(move || {
-            let result = media::play(account, console, resolution, window, cancel, |status| { let _ = tx.send(Event::StreamStatus(status)); });
+            let result = media::play(account, console, resolution, window, cancel, None, |status| { let _ = tx.send(Event::StreamStatus(status)); });
             let _ = tx.send(Event::StreamEnded(result));
         });
     }
@@ -236,6 +236,13 @@ impl Render for RemotePlay {
 
 fn main() {
     journal::record("app_started", json!({"version": env!("CARGO_PKG_VERSION")}));
+    if std::env::args().nth(1).as_deref() == Some("--probe-resolutions") {
+        if let Err(error) = probe_resolutions() {
+            journal::record("resolution_probe_unavailable", json!({"reason": error}));
+            std::process::exit(1);
+        }
+        return;
+    }
     let (tx, rx) = mpsc::channel();
     application().with_assets(assets::Assets).run(|cx| {
         init(cx);
@@ -259,6 +266,7 @@ fn main() {
                     cx.background_executor().timer(Duration::from_millis(120)).await;
                     while let Ok(event) = rx.try_recv() {
                         if view.update(cx, |view: &mut RemotePlay, cx| { view.receive(event); cx.notify(); }).is_err() { return; }
+                        cx.refresh();
                     }
                 }).detach();
                 RemotePlay { tx, account: None, consoles: Vec::new(), sign_in: None, restoring: true,
@@ -267,4 +275,23 @@ fn main() {
             })
         }).expect("Could not open the GPUI window");
     });
+}
+
+fn probe_resolutions() -> xbox::Result<()> {
+    use xbox::Resolution::{P720, P800, P900};
+
+    let xbox = Arc::new(xbox::restore_sign_in()?.ok_or("Sign in through the app first")?);
+    let consoles = xbox.consoles()?;
+    let [console] = consoles.as_slice() else {
+        return Err("Resolution probe requires exactly one available Xbox".into());
+    };
+    for resolution in [P720, P800, P900] {
+        let result = media::play(xbox.clone(), console.clone(), resolution, None,
+            Arc::new(AtomicBool::new(false)), Some(Duration::from_secs(16)), |_| {});
+        journal::record("resolution_probe_ended", json!({
+            "requested_height": resolution.dimensions().1,
+            "success": result.is_ok(),
+        }));
+    }
+    Ok(())
 }

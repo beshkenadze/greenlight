@@ -69,7 +69,7 @@ fn command(player: &mut Player, message: Value) -> Result<()> {
 }
 
 pub fn play(xbox: Arc<Xbox>, console: Console, resolution: Resolution, window: Option<VideoWindow>,
-            cancel: Arc<AtomicBool>, status: impl Fn(String)) -> Result<()> {
+            cancel: Arc<AtomicBool>, playback_limit: Option<Duration>, status: impl Fn(String)) -> Result<()> {
     status("Preparing Xbox session…".into());
     let (requested_width, requested_height) = resolution.dimensions();
     journal::record("stream_requested", json!({"bitrate_limit_kbps": 20480, "width": requested_width, "height": requested_height}));
@@ -95,9 +95,12 @@ pub fn play(xbox: Arc<Xbox>, console: Console, resolution: Resolution, window: O
         let mut controller = crate::input::Controller::new();
         let mut answer_set = false;
         let mut candidates = None;
-        let mut connected = false;
+        let mut first_video: Option<Instant> = None;
         while !cancel.load(Ordering::Relaxed) {
-            if !connected && start.elapsed() > Duration::from_secs(35) {
+            if first_video.zip(playback_limit).is_some_and(|(started, limit)| started.elapsed() >= limit) {
+                break;
+            }
+            if first_video.is_none() && start.elapsed() > Duration::from_secs(35) {
                 journal::record("first_video_timeout", json!({}));
                 return Err("GStreamer did not receive video before the timeout".into());
             }
@@ -105,7 +108,7 @@ pub fn play(xbox: Arc<Xbox>, console: Console, resolution: Resolution, window: O
                 xbox.keepalive(&path)?;
                 keepalive = Instant::now();
             }
-            if connected && last_stats.elapsed() >= Duration::from_secs(5) {
+            if first_video.is_some() && last_stats.elapsed() >= Duration::from_secs(5) {
                 command(&mut player, json!({"action":"stats"}))?;
                 last_stats = Instant::now();
             }
@@ -121,7 +124,7 @@ pub fn play(xbox: Arc<Xbox>, console: Console, resolution: Resolution, window: O
                     Some("answer-set") => answer_set = true,
                     Some("candidates") => candidates = event.get("candidates").cloned(),
                     Some("video") => {
-                        connected = true;
+                        first_video.get_or_insert_with(Instant::now);
                         let width = event.get("width").and_then(Value::as_u64).unwrap_or_default();
                         let height = event.get("height").and_then(Value::as_u64).unwrap_or_default();
                         let decoder = event.get("decoder").and_then(Value::as_str).unwrap_or("GStreamer");

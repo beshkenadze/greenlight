@@ -70,6 +70,10 @@ journal, run the binary with `2>>ally-remote-play.log`, then follow it with
 `tail -f ally-remote-play.log`. The journal contains sign-in and stream stages,
 HTTP failure statuses, console counts, and negotiated video dimensions and
 decoder. It omits codes, tokens, console IDs, and SDP/ICE payloads.
+Run the binary with `--probe-resolutions` after signing in once to test 720p,
+800p and 900p in sequence against a single available Xbox. The probe records
+decoded frame sizes and five-second video counters and stops each stream
+after 16 seconds of video.
 
 The GStreamer worker is based on the MIT-licensed experimental media path
 previously developed alongside Greenlight. See LICENSE for the original
