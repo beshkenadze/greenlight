@@ -15,7 +15,6 @@ enum Event {
     Device(DevicePrompt),
     Account { xbox: Arc<xbox::Xbox>, consoles: Vec<xbox::Console> },
     SignInEnded(xbox::Result<()>),
-    RestoreEnded(xbox::Result<Option<(Arc<xbox::Xbox>, Vec<xbox::Console>)>>),
     StreamStatus(String),
     StreamEnded(xbox::Result<()>),
 }
@@ -50,7 +49,6 @@ struct RemotePlay {
     account: Option<Arc<xbox::Xbox>>,
     consoles: Vec<xbox::Console>,
     sign_in: Option<Arc<AtomicBool>>,
-    restoring: bool,
     stream: Option<Arc<AtomicBool>>,
     resolution: xbox::Resolution,
     device: Option<DevicePrompt>,
@@ -76,7 +74,7 @@ fn x11_window(window: &Window) -> Option<media::VideoWindow> {
 
 impl RemotePlay {
     fn start_login(&mut self) {
-        if self.sign_in.is_some() || self.stream.is_some() || self.restoring { return; }
+        if self.sign_in.is_some() || self.stream.is_some() { return; }
         let cancel = Arc::new(AtomicBool::new(false));
         self.sign_in = Some(cancel.clone());
         self.device = None;
@@ -133,17 +131,6 @@ impl RemotePlay {
                 self.device = Some(prompt);
             }
             Event::Account { xbox, consoles } => self.show_account(xbox, consoles),
-            Event::RestoreEnded(result) => {
-                self.restoring = false;
-                match result {
-                    Ok(Some((xbox, consoles))) => self.show_account(xbox, consoles),
-                    Ok(None) => self.status = "Ally Remote Play".into(),
-                    Err(error) => {
-                        journal::record("session_restore_failed", json!({}));
-                        self.status = error;
-                    }
-                }
-            }
             Event::SignInEnded(result) => {
                 journal::record("sign_in_ended", json!({"success": result.is_ok()}));
                 self.sign_in = None;
@@ -188,7 +175,7 @@ impl Render for RemotePlay {
                     }
                     cx.notify();
                 })));
-        } else if self.sign_in.is_none() && !self.restoring { header = header.child(sign_button); }
+        } else if self.sign_in.is_none() { header = header.child(sign_button); }
         let mut content = div().flex_1().p_4().flex().flex_col().gap_3().bg(rgb(0x13161a)).text_color(rgb(0xf5f5f5));
         if let Some(prompt) = &self.device {
             let url = prompt.url.clone();
@@ -244,7 +231,11 @@ fn main() {
         return;
     }
     let (tx, rx) = mpsc::channel();
-    application().with_assets(assets::Assets).run(|cx| {
+    let saved_account = xbox::restore_sign_in().and_then(|account| account.map(|xbox| {
+        let consoles = xbox.consoles()?;
+        Ok((Arc::new(xbox), consoles))
+    }).transpose());
+    application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
         let bounds = Bounds::centered(None, size(px(1120.), px(690.)), cx);
         open_window(WindowOptions {
@@ -254,14 +245,6 @@ fn main() {
         }, cx, |window, cx| {
             if let Some(window) = x11_window(window) { media::focus_gamescope(window.xid); }
             cx.new(|cx| {
-                let restore_tx = tx.clone();
-                thread::spawn(move || {
-                    let result = xbox::restore_sign_in().and_then(|account| account.map(|xbox| {
-                        let consoles = xbox.consoles()?;
-                        Ok((Arc::new(xbox), consoles))
-                    }).transpose());
-                    let _ = restore_tx.send(Event::RestoreEnded(result));
-                });
                 cx.spawn(async move |view, cx| loop {
                     cx.background_executor().timer(Duration::from_millis(120)).await;
                     while let Ok(event) = rx.try_recv() {
@@ -269,9 +252,18 @@ fn main() {
                         cx.refresh();
                     }
                 }).detach();
-                RemotePlay { tx, account: None, consoles: Vec::new(), sign_in: None, restoring: true,
+                let mut view = RemotePlay { tx, account: None, consoles: Vec::new(), sign_in: None,
                     stream: None, resolution: xbox::Resolution::default(), device: None,
-                    status: if media::runtime_available() { "Checking saved Microsoft sign-in…".into() } else { "GStreamer worker missing".into() } }
+                    status: if media::runtime_available() { "Ally Remote Play".into() } else { "GStreamer worker missing".into() } };
+                match saved_account {
+                    Ok(Some((xbox, consoles))) => view.show_account(xbox, consoles),
+                    Ok(None) => {}
+                    Err(error) => {
+                        journal::record("session_restore_failed", json!({}));
+                        view.status = error;
+                    }
+                }
+                view
             })
         }).expect("Could not open the GPUI window");
     });
