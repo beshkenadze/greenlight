@@ -25,11 +25,35 @@ pub struct Console {
 #[derive(Deserialize)]
 pub struct DeviceCode {
     pub user_code: String,
-    pub verification_uri: String,
+    verification_uri: Url,
+    #[serde(default)]
+    verification_uri_complete: Option<String>,
     device_code: String,
     expires_in: u64,
     #[serde(default = "poll_interval")]
     interval: u64,
+}
+
+impl DeviceCode {
+    pub fn verification_link(&self) -> (Url, bool) {
+        if let Some(url) = self.verification_uri_complete.as_deref()
+            .and_then(|value| Url::parse(value).ok())
+            .filter(microsoft_url)
+        {
+            return (url, true);
+        }
+
+        let mut url = self.verification_uri.clone();
+        // The Xbox consumer flow returns Microsoft Link, which accepts the OTC
+        // query parameter. Leave other Microsoft verification pages untouched.
+        let prefilled = matches!(url.host_str(), Some("microsoft.com" | "www.microsoft.com"))
+            && matches!(url.path(), "/link" | "/link/")
+            && url.query().is_none();
+        if prefilled {
+            url.query_pairs_mut().append_pair("otc", &self.user_code);
+        }
+        (url, prefilled)
+    }
 }
 
 fn poll_interval() -> u64 { 5 }
@@ -85,11 +109,10 @@ fn field(value: &Value, key: &str, stage: &str) -> Result<String> {
         .ok_or_else(|| format!("{stage}: missing {key}"))
 }
 
-fn microsoft_url(url: &str) -> bool {
-    Url::parse(url).ok().is_some_and(|u| {
-        u.scheme() == "https" && matches!(u.host_str(), Some("microsoft.com" | "www.microsoft.com" | "login.microsoftonline.com"))
-            && u.username().is_empty() && u.password().is_none() && u.port().is_none()
-    })
+fn microsoft_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && matches!(url.host_str(), Some("microsoft.com" | "www.microsoft.com" | "login.microsoftonline.com" | "login.live.com"))
+        && url.username().is_empty() && url.password().is_none() && url.port().is_none()
 }
 
 fn xbox_region(url: &str) -> Result<Url> {
@@ -296,7 +319,28 @@ mod tests {
     fn rejects_foreign_token_endpoints() {
         assert!(xbox_region("https://uks.core.gssv-play-prodxhome.xboxlive.com").is_ok());
         assert!(xbox_region("https://gssv-play-prod.xboxlive.com.example.net").is_err());
-        assert!(!microsoft_url("https://example.net/devicelogin"));
+        assert!(!microsoft_url(&Url::parse("https://example.net/devicelogin").unwrap()));
+    }
+    #[test]
+    fn prefills_only_supported_microsoft_verification_links() {
+        let mut device = DeviceCode {
+            verification_uri: Url::parse("https://www.microsoft.com/link").unwrap(),
+            verification_uri_complete: Some("https://example.net/go".into()),
+            user_code: "TEST+123".into(),
+            device_code: String::new(),
+            expires_in: 900,
+            interval: 5,
+        };
+        let (url, prefilled) = device.verification_link();
+        assert!(prefilled);
+        assert_eq!(url.as_str(), "https://www.microsoft.com/link?otc=TEST%2B123");
+
+        device.verification_uri = Url::parse("https://microsoft.com/devicelogin").unwrap();
+        assert_eq!(device.verification_link(), (device.verification_uri.clone(), false));
+
+        let complete = "https://login.live.com/oauth20_remoteconnect.srf?otc=TEST";
+        device.verification_uri_complete = Some(complete.into());
+        assert_eq!(device.verification_link(), (Url::parse(complete).unwrap(), true));
     }
     #[test]
     fn decodes_teredo_endpoints() {

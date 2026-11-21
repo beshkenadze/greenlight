@@ -42,9 +42,11 @@ mapping, and playback before either port is distributed.
 
 ## Login and console discovery
 
-Select **Sign in with Microsoft**, confirm the device code in the official
-Microsoft browser flow, then select a console available to the signed-in Xbox
-account. Power state and the console ID are displayed for identification. A
+Select **Sign in with Microsoft**, then scan the QR code or open Microsoft
+sign-in in your browser. The Xbox consumer sign-in link prefills the code.
+The code remains visible for manual entry if Microsoft requests it. After
+confirming sign-in, select a console available to the signed-in Xbox account.
+Power state and the console ID are displayed for identification. A
 console ID does not register or link an Xbox to another account.
 
 `XBOX_CLIENT_ID` can override the public OAuth app ID when deploying an

@@ -4,15 +4,41 @@ mod xbox;
 
 use gpui_kit::component::{button::{Button, ButtonVariants}, label::Label};
 use gpui_kit::*;
+use qrcode::{Color, QrCode};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc}, thread, time::Duration};
 
 enum Event {
-    Device { url: String, code: String },
+    Device(DevicePrompt),
     Account { xbox: Arc<xbox::Xbox>, consoles: Vec<xbox::Console> },
     SignInEnded(xbox::Result<()>),
     StreamStatus(String),
     StreamEnded(xbox::Result<()>),
+}
+
+struct DevicePrompt {
+    url: String,
+    code: String,
+    prefilled: bool,
+    qr: Option<Arc<QrCode>>,
+}
+
+fn login_qr(qr: Arc<QrCode>) -> impl IntoElement {
+    let module = px(7.);
+    let quiet_zone = 4;
+    let side = module * (qr.width() + quiet_zone * 2) as f32;
+    canvas(|_, _, _| (), move |bounds, (), window, _| {
+        window.paint_quad(fill(bounds, rgb(0xffffff)));
+        for y in 0..qr.width() {
+            for x in 0..qr.width() {
+                if qr[(x, y)] == Color::Dark {
+                    let origin = bounds.origin
+                        + point(module * (x + quiet_zone) as f32, module * (y + quiet_zone) as f32);
+                    window.paint_quad(fill(Bounds { origin, size: size(module, module) }, rgb(0x000000)));
+                }
+            }
+        }
+    }).w(side).h(side).flex_none()
 }
 
 struct RemotePlay {
@@ -21,7 +47,7 @@ struct RemotePlay {
     consoles: Vec<xbox::Console>,
     sign_in: Option<Arc<AtomicBool>>,
     stream: Option<Arc<AtomicBool>>,
-    device: Option<(String, String)>,
+    device: Option<DevicePrompt>,
     status: String,
 }
 
@@ -55,7 +81,13 @@ impl RemotePlay {
                 let client = xbox::client()?;
                 let client_id = xbox::public_client_id();
                 let device = xbox::begin_sign_in(&client, &client_id)?;
-                let _ = tx.send(Event::Device { url: device.verification_uri.clone(), code: device.user_code.clone() });
+                let (url, prefilled) = device.verification_link();
+                let _ = tx.send(Event::Device(DevicePrompt {
+                    qr: QrCode::new(url.as_str()).ok().map(Arc::new),
+                    url: url.to_string(),
+                    code: device.user_code.clone(),
+                    prefilled,
+                }));
                 let xbox = Arc::new(xbox::finish_sign_in(client, client_id, device, &cancel)?);
                 let consoles = xbox.consoles()?;
                 let _ = tx.send(Event::Account { xbox, consoles });
@@ -80,9 +112,9 @@ impl RemotePlay {
 
     fn receive(&mut self, event: Event) {
         match event {
-            Event::Device { url, code } => {
+            Event::Device(prompt) => {
                 self.status = "Waiting for Microsoft confirmation".into();
-                self.device = Some((url, code));
+                self.device = Some(prompt);
             }
             Event::Account { xbox, consoles } => {
                 self.status = if consoles.is_empty() { "No Xbox available for Remote Play".into() } else { "Choose an Xbox".into() };
@@ -120,11 +152,15 @@ impl Render for RemotePlay {
         if self.stream.is_some() { header = header.child(stop_button); }
         else if self.sign_in.is_none() { header = header.child(sign_button); }
         let mut content = div().flex_1().p_4().flex().flex_col().gap_3().bg(rgb(0x13161a)).text_color(rgb(0xf5f5f5));
-        if let Some((url, code)) = &self.device {
-            let url = url.clone();
+        if let Some(prompt) = &self.device {
+            let url = prompt.url.clone();
+            if let Some(qr) = &prompt.qr {
+                let instructions = if prompt.prefilled { "Scan with your phone or tablet to confirm sign-in." }
+                    else { "Scan with your phone or tablet, then enter the code below." };
+                content = content.child(div().child(instructions)).child(login_qr(qr.clone()));
+            }
             content = content
-                .child(div().child("Open Microsoft device sign-in and enter this code:"))
-                .child(div().text_xl().child(code.clone()))
+                .child(div().text_xl().child(format!("Code: {}", prompt.code)))
                 .child(Button::new("open-microsoft").primary().label("Open Microsoft")
                     .on_click(move |_, _, cx| cx.open_url(&url)))
                 .child(Button::new("cancel-login").label("Cancel")
