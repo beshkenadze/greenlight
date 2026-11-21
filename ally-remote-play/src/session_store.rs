@@ -45,7 +45,26 @@ pub fn load(client_id: &str) -> io::Result<Option<String>> {
 }
 
 pub fn save(client_id: &str, refresh_token: &str) -> io::Result<()> {
-    let path = path()?;
+    write_json(path()?, &Session { client_id: client_id.into(), refresh_token: refresh_token.into() })
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct Preferences {
+    #[serde(default)]
+    lsfg_enabled: bool,
+}
+
+pub fn load_lsfg() -> bool {
+    path().ok().and_then(|path| fs::File::open(path.with_extension("preferences.json")).ok())
+        .and_then(|file| serde_json::from_reader::<_, Preferences>(file).ok())
+        .unwrap_or_default().lsfg_enabled
+}
+
+pub fn save_lsfg(lsfg_enabled: bool) -> io::Result<()> {
+    write_json(path()?.with_extension("preferences.json"), &Preferences { lsfg_enabled })
+}
+
+fn write_json(path: PathBuf, data: &impl Serialize) -> io::Result<()> {
     let parent = path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
     let mut dir = fs::DirBuilder::new();
     dir.recursive(true);
@@ -53,10 +72,7 @@ pub fn save(client_id: &str, refresh_token: &str) -> io::Result<()> {
     std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
     dir.create(parent)?;
     let file = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(file.as_file(), &Session {
-        client_id: client_id.into(),
-        refresh_token: refresh_token.into(),
-    })?;
+    serde_json::to_writer(file.as_file(), data)?;
     file.as_file().sync_all()?;
     file.persist(path)?;
     Ok(())

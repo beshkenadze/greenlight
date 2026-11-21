@@ -1,10 +1,11 @@
 mod input;
 mod journal;
+mod lsfg;
 mod media;
 mod session_store;
 mod xbox;
 
-use gpui_kit::component::{button::{Button, ButtonVariants}, label::Label};
+use gpui_kit::component::{button::{Button, ButtonVariants}, label::Label, switch::Switch};
 use gpui_kit::*;
 use qrcode::{Color, QrCode};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -51,6 +52,7 @@ struct RemotePlay {
     sign_in: Option<Arc<AtomicBool>>,
     stream: Option<Arc<AtomicBool>>,
     resolution: xbox::Resolution,
+    lsfg_enabled: bool,
     device: Option<DevicePrompt>,
     status: String,
 }
@@ -111,8 +113,9 @@ impl RemotePlay {
         self.status = "Connecting to Xbox…".into();
         let tx = self.tx.clone();
         let resolution = self.resolution;
+        let run = media::Run::Interactive { lsfg: self.lsfg_enabled };
         thread::spawn(move || {
-            let result = media::play(account, console, resolution, window, cancel, None, |status| { let _ = tx.send(Event::StreamStatus(status)); });
+            let result = media::play(account, console, resolution, window, cancel, run, |status| { let _ = tx.send(Event::StreamStatus(status)); });
             let _ = tx.send(Event::StreamEnded(result));
         });
     }
@@ -150,7 +153,7 @@ impl RemotePlay {
 }
 
 impl Render for RemotePlay {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sign_button = Button::new("sign-in").primary().label("Sign in with Microsoft")
             .on_click(cx.listener(|view, _, _, cx| { view.start_login(); cx.notify(); }));
         let stop_button = Button::new("stop").label("Stop stream")
@@ -192,6 +195,27 @@ impl Render for RemotePlay {
                     .on_click(cx.listener(|view, _, _, _| { if let Some(cancel) = &view.sign_in { cancel.store(true, Ordering::Relaxed); } })));
         }
         if self.stream.is_none() {
+            if cfg!(target_os = "linux") && x11_window(window).is_some() {
+                content = content.child(Switch::new("lsfg")
+                    .label("LSFG 2× Performance · Flow Scale 1.0")
+                    .checked(self.lsfg_enabled)
+                    .on_change(cx.listener(|view, enabled: &bool, _, cx| {
+                        if *enabled {
+                            if let Err(error) = lsfg::Runtime::discover() {
+                                view.status = error;
+                                cx.notify();
+                                return;
+                            }
+                        }
+                        view.lsfg_enabled = *enabled;
+                        if let Err(error) = session_store::save_lsfg(*enabled) {
+                            view.status = "Could not save the LSFG setting".into();
+                            journal::record("lsfg_setting_save_failed", json!({"kind": format!("{:?}", error.kind())}));
+                        }
+                        journal::record("lsfg_setting_changed", json!({"enabled": enabled}));
+                        cx.notify();
+                    })));
+            }
             if !self.consoles.is_empty() {
                 let mut choices = div().flex().items_center().gap_2().child("Requested resolution");
                 for (index, (resolution, label)) in xbox::Resolution::CHOICES.into_iter().enumerate() {
@@ -223,12 +247,12 @@ impl Render for RemotePlay {
 
 fn main() {
     journal::record("app_started", json!({"version": env!("CARGO_PKG_VERSION")}));
-    if std::env::args().nth(1).as_deref() == Some("--probe-resolutions") {
-        if let Err(error) = probe_resolutions() {
-            journal::record("resolution_probe_unavailable", json!({"reason": error}));
-            std::process::exit(1);
-        }
-        return;
+    match std::env::args().nth(1).as_deref() {
+        Some("--probe-resolutions") => return run_probe(media::Run::Timed(Duration::from_secs(16))),
+        Some("--probe-latency") => return run_probe(media::Run::Latency),
+        Some("--probe-transport") => return run_probe(media::Run::Transport),
+        Some("--probe-vulkan") => return run_probe(media::Run::Vulkan),
+        _ => {}
     }
     let (tx, rx) = mpsc::channel();
     let saved_account = xbox::restore_sign_in().and_then(|account| account.map(|xbox| {
@@ -254,6 +278,7 @@ fn main() {
                 }).detach();
                 let mut view = RemotePlay { tx, account: None, consoles: Vec::new(), sign_in: None,
                     stream: None, resolution: xbox::Resolution::default(), device: None,
+                    lsfg_enabled: session_store::load_lsfg(),
                     status: if media::runtime_available() { "Ally Remote Play".into() } else { "GStreamer worker missing".into() } };
                 match saved_account {
                     Ok(Some((xbox, consoles))) => view.show_account(xbox, consoles),
@@ -269,18 +294,30 @@ fn main() {
     });
 }
 
-fn probe_resolutions() -> xbox::Result<()> {
-    use xbox::Resolution::{P720, P800, P900};
+fn run_probe(run: media::Run) {
+    if let Err(error) = probe(run) {
+        journal::record("probe_unavailable", json!({"reason": error}));
+        std::process::exit(1);
+    }
+}
+
+fn probe(run: media::Run) -> xbox::Result<()> {
+    use xbox::Resolution::{P720, P800, P900, P1080};
 
     let xbox = Arc::new(xbox::restore_sign_in()?.ok_or("Sign in through the app first")?);
     let consoles = xbox.consoles()?;
     let [console] = consoles.as_slice() else {
         return Err("Resolution probe requires exactly one available Xbox".into());
     };
-    for resolution in [P720, P800, P900] {
-        let result = media::play(xbox.clone(), console.clone(), resolution, None,
-            Arc::new(AtomicBool::new(false)), Some(Duration::from_secs(16)), |_| {});
-        journal::record("resolution_probe_ended", json!({
+    let resolutions: &[_] = match run {
+        media::Run::Latency => &[P720, P1080],
+        media::Run::Transport | media::Run::Vulkan => &[P1080],
+        _ => &[P720, P800, P900],
+    };
+    for resolution in resolutions {
+        let result = media::play(xbox.clone(), console.clone(), *resolution, None,
+            Arc::new(AtomicBool::new(false)), run, |_| {});
+        journal::record("probe_stream_ended", json!({
             "requested_height": resolution.dimensions().1,
             "success": result.is_ok(),
         }));

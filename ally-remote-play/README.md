@@ -63,6 +63,21 @@ optional `ALLY_SESSION_FILE` environment variable overrides its location.
 **Sign out** removes the stored session from this device. When Microsoft
 expires or revokes the saved token, confirm sign-in again.
 
+## LSFG on Linux
+
+Enable **LSFG 2× Performance · Flow Scale 1.0** before choosing an Xbox.
+The setting is saved locally and applied when each stream starts. LSFG uses
+the optimized VA-API NV12-to-Vulkan video path and a 20,000 kbit/s limit.
+To change the setting, stop the current stream first.
+
+Install the lsfg-vk 2.x Vulkan layer and select the `lsfg-vk` beta branch
+of Lossless Scaling in Steam. The app looks for the Vulkan layer in the
+usual implicit-layer directories and for `lsfg-vk.dll` in Steam's default
+library. On other installations set `ALLY_LSFG_LAYER_DIR` to the directory
+containing the layer manifest and `ALLY_LSFG_DLL` to the DLL's path.
+Vulkan output for the switch requires X11 or XWayland with libXRes and the
+GStreamer VA-API and Vulkan plugins.
+
 ## Diagnostics
 
 The app writes one JSON event per line to standard error. To save a local
@@ -74,6 +89,40 @@ Run the binary with `--probe-resolutions` after signing in once to test 720p,
 800p and 900p in sequence against a single available Xbox. The probe records
 decoded frame sizes and five-second video counters and stops each stream
 after 16 seconds of video.
+
+Run the binary with `--probe-latency` for a 720p and 1080p comparison at an
+SDP limit of 20,000 kbit/s. It requires NumPy and an active gameplay scene
+with a stationary camera. It injects a repeatable right-stick motion at the
+input loop and uses decoded frame motion to detect the response. It records
+input-loop-to-data-channel time, first RTP packet to video-sink entry time
+(before the jitter buffer when the sample is tagged `pre_jitter`), and
+input-loop-to-first-detected-turn time. These measurements stop at the sink
+and exclude display scanout. Put the console in the same scene for both modes.
+
+`--probe-transport` runs the 1080p test and requests the RTP absolute
+capture-time extension. It records capture metadata, the selected ICE
+candidate type, and the remote video RTCP Sender Report clock gap. The
+`*_wall_ms` fields compare different clocks. To estimate the capture time
+on the local clock, add `sender_report_wall_gap_ms - RTT / 2` to the remote
+timestamp. This requires a separately measured RTT when the WebRTC statistics
+omit it, and assumes similar transit time in both directions.
+
+Set `ALLY_VIDEO_RENDERER=vulkan` to use GStreamer's Vulkan output with the
+existing hardware decoder. On the Linux VA-API path the app uploads NV12
+and converts it in Vulkan when the converter is available. Set
+`ALLY_VULKAN_CONVERSION=cpu` for the CPU BGRA path. The decoded-frame queue
+holds at most two buffers and drops old queued frames under load.
+
+Run `--probe-vulkan` for a 1080p, 20,000 kbit/s run with camera motion and
+queue counters. On Linux/VA-API it analyzes downsized luma frames in a
+separate, single-buffer branch. Set `ALLY_VULKAN_MOTION_PROBE=inline` to
+reproduce the old inline benchmark. The stage profile reports queue wait,
+CPU-side frame preparation, upload-to-sink time and inline analysis time,
+followed by a flag indicating whether motion analysis was active. The
+parallel analyzer is timed separately. The probe can run with an external
+lsfg-vk layer. The base sink counts source buffers only. Count generated
+frames after lsfg-vk in the Vulkan layer chain. Vulkan submission and
+physical display scanout are different measurement points.
 
 The GStreamer worker is based on the MIT-licensed experimental media path
 previously developed alongside Greenlight. See LICENSE for the original
